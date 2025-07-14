@@ -21,19 +21,46 @@
 #include <zephyr/bluetooth/gatt.h>
 
 #include <bluetooth/gatt_dm.h>
+#include <zephyr/settings/settings.h>
+
+/* Custom Service UUID: 12345678-1234-1234-1234-123456789ABC */
+#define CUSTOM_SERVICE_UUID BT_UUID_DECLARE_128( \
+	BT_UUID_128_ENCODE(0x12345678, 0x1234, 0x1234, 0x1234, 0x123456789ABC))
+
+/* Read Characteristic UUID */
+#define CUSTOM_READ_CHAR_UUID BT_UUID_DECLARE_128( \
+	BT_UUID_128_ENCODE(0x12345678, 0x1234, 0x1234, 0x1234, 0x123456789ABD))
+
+/* Write Characteristic UUID */
+#define CUSTOM_WRITE_CHAR_UUID BT_UUID_DECLARE_128( \
+	BT_UUID_128_ENCODE(0x12345678, 0x1234, 0x1234, 0x1234, 0x123456789ABE))
+
+/* Notify Characteristic UUID */
+#define CUSTOM_NOTIFY_CHAR_UUID BT_UUID_DECLARE_128( \
+	BT_UUID_128_ENCODE(0x12345678, 0x1234, 0x1234, 0x1234, 0x123456789ABF))
+
+/* GATT service data */
+static uint8_t read_data[20] = "Hello from nRF52!";
+static uint8_t write_data[20];
+static bool notify_enabled = false;
+
+/* Function prototypes */
+static ssize_t read_characteristic(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+				   void *buf, uint16_t len, uint16_t offset);
+static ssize_t write_characteristic(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+				    const void *buf, uint16_t len, uint16_t offset, uint8_t flags);
+static void notify_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value);
 
 #define DEVICE_NAME             CONFIG_BT_DEVICE_NAME
 #define DEVICE_NAME_LEN         (sizeof(DEVICE_NAME) - 1)
-
-/* Key used to accept or reject passkey value */
-#define KEY_PAIRING_ACCEPT DK_BTN1_MSK
-#define KEY_PAIRING_REJECT DK_BTN2_MSK
 
 static struct k_work adv_work;
 
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
 	BT_DATA(BT_DATA_NAME_COMPLETE, DEVICE_NAME, DEVICE_NAME_LEN),
+	BT_DATA_BYTES(BT_DATA_UUID128_ALL,
+		      BT_UUID_128_ENCODE(0x12345678, 0x1234, 0x1234, 0x1234, 0x123456789ABC)),
 };
 
 static void discover_all_completed(struct bt_gatt_dm *dm, void *ctx)
@@ -180,17 +207,83 @@ static struct bt_conn_auth_info_cb conn_auth_info_callbacks = {
 	.pairing_failed = pairing_failed
 };
 
+/* GATT Characteristic Read Callback */
+static ssize_t read_characteristic(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+				   void *buf, uint16_t len, uint16_t offset)
+{
+	printk("Read request received\n");
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, read_data, sizeof(read_data));
+}
+
+/* GATT Characteristic Write Callback */
+static ssize_t write_characteristic(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+				    const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
+{
+	if (offset + len > sizeof(write_data)) {
+		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+	}
+
+	memcpy(write_data + offset, buf, len);
+	write_data[offset + len] = '\0'; /* Null terminate for safety */
+	
+	printk("Write request received: %s\n", write_data);
+	
+	return len;
+}
+
+/* Notification CCC Changed Callback */
+static void notify_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
+{
+	notify_enabled = (value == BT_GATT_CCC_NOTIFY);
+	printk("Notifications %s\n", notify_enabled ? "enabled" : "disabled");
+}
+
+/* Define the Custom GATT Service */
+BT_GATT_SERVICE_DEFINE(custom_service,
+	BT_GATT_PRIMARY_SERVICE(CUSTOM_SERVICE_UUID),
+	
+	/* Read Characteristic */
+	BT_GATT_CHARACTERISTIC(CUSTOM_READ_CHAR_UUID,
+			       BT_GATT_CHRC_READ,
+			       BT_GATT_PERM_READ_ENCRYPT,
+			       read_characteristic, NULL, NULL),
+	
+	/* Write Characteristic */
+	BT_GATT_CHARACTERISTIC(CUSTOM_WRITE_CHAR_UUID,
+			       BT_GATT_CHRC_WRITE,
+			       BT_GATT_PERM_WRITE_ENCRYPT,
+			       NULL, write_characteristic, NULL),
+	
+	/* Notify Characteristic */
+	BT_GATT_CHARACTERISTIC(CUSTOM_NOTIFY_CHAR_UUID,
+			       BT_GATT_CHRC_NOTIFY,
+			       BT_GATT_PERM_NONE,
+			       NULL, NULL, NULL),
+	BT_GATT_CCC(notify_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+);
+
 int main(void)
 {
 	int err;
 
-	printk("Starting GATT Discovery Manager sample\n");
+	printk("Starting GATT Server with Discovery Manager\n");
+
+	/* Initialize settings for bonding */
+	err = settings_subsys_init();
+	if (err) {
+		printk("Settings init failed (err %d)\n", err);
+		return 0;
+	}
 
 	err = bt_enable(NULL);
 	if (err) {
 		printk("BLE init failed with error code %d\n", err);
 		return 0;
 	}
+
+	/* Load settings */
+	settings_load();
+	printk("Bluetooth initialized\n");
 
 	err = bt_conn_auth_cb_register(&conn_auth_callbacks);
 	if (err) {
